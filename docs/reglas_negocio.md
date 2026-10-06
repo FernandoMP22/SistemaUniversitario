@@ -24,6 +24,13 @@ El sistema permitirá gestionar:
 - Backend: FastAPI.
 - Frontend: Angular.
 
+## Convención para valores internos
+
+- Los valores de estados, tipos y conceptos se escribirán en minúsculas
+  y sin tildes, de forma consistente en PostgreSQL, FastAPI y Angular.
+- Los nombres, descripciones y textos de la interfaz conservarán
+  su ortografía y sus tildes.
+
 ## Tablas acordadas
 
 1. sede
@@ -239,7 +246,8 @@ El sistema permitirá gestionar:
 - Cada pago pertenece a una inscripción.
 - Una inscripción puede tener varios pagos.
 - Cada pago registra concepto, monto, fecha y estado.
-- Los conceptos permitidos serán matrícula y mensualidad.
+- Los valores internos permitidos para concepto serán `matricula` y
+  `mensualidad`. En la interfaz se mostrarán como Matrícula y Mensualidad.
 - El monto debe ser mayor que cero.
 - Los estados permitidos serán registrado y anulado.
 - Cada pago tendrá un número de comprobante único.

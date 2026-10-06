@@ -12,6 +12,10 @@
 - UNIQUE significa que el valor o combinación no puede repetirse.
 - CHECK representa una condición que deben cumplir los datos.
 - Los importes monetarios se expresarán en quetzales.
+- Los valores internos de estados, tipos y conceptos se escribirán
+  en minúsculas y sin tildes.
+- Los nombres, descripciones y etiquetas de la interfaz conservarán
+  sus tildes; el concepto interno `matricula` se mostrará como Matrícula.
 - No se utilizará eliminación en cascada para el historial académico
   ni financiero.
 
@@ -293,10 +297,10 @@ Registra los pagos realizados para una inscripción.
 
 Restricciones adicionales:
 
-- CHECK: concepto en matrícula o mensualidad.
+- CHECK: concepto en `matricula` o `mensualidad`.
 - CHECK: estado en registrado o anulado.
-- Para matrícula, año y mes deben ser NULL.
-- Para mensualidad, año y mes deben tener valor.
+- Para el concepto `matricula`, año y mes deben ser NULL.
+- Para el concepto `mensualidad`, año y mes deben tener valor.
 - Un índice único parcial impedirá dos matrículas registradas
   para una misma inscripción.
 - Un índice único parcial impedirá dos mensualidades registradas
