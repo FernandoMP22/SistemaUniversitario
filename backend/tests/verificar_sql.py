@@ -67,6 +67,9 @@ def verificar_sql():
                 indice = columnas.index("coincide")
                 diferencias = sum(fila[indice] is not True for fila in filas)
                 print(f"04_verificacion_poblado.sql: {len(filas)} conteos, {diferencias} diferencias")
+                for fila in filas:
+                    if fila[indice] is not True:
+                        print(f"  {fila[0]}: esperado={fila[1]}, actual={fila[2]}")
                 fallos += diferencias
             if "id_asignacion_curso" in columnas and "nota" in columnas:
                 print(f"Resultados cerrados incoherentes: {len(filas)}")
