@@ -59,9 +59,15 @@ Swagger: http://127.0.0.1:8000/docs
   si no existen secciones relacionadas.
 - Estudiantes: listado, busqueda, creacion, actualizacion de datos
   personales y eliminacion si no existen inscripciones relacionadas.
+- Cursos: listado, busqueda, creacion, actualizacion y eliminacion
+  cuando no existen planes, prerrequisitos ni secciones relacionados.
+- Planes de estudio: gestion de los cursos de cada carrera y su semestre,
+  respetando los requisitos completos y las asignaciones existentes.
+- Prerrequisitos: gestion de requisitos directos entre cursos,
+  sin autorreferencias, ciclos ni cambios incompatibles con planes o historial.
 
 Cada modulo mantiene archivos separados en models, schemas, database
-y routers. Los cuatro routers estan registrados en main.py.
+y routers. Los routers de los modulos estan registrados en main.py.
 
 ## Facultades, carreras, docentes y estudiantes
 
@@ -197,6 +203,143 @@ Los resultados esperados se apoyan en las pruebas automaticas descritas abajo.
 | Estudiantes | Estudiante con historial | DELETE de un estudiante con inscripciones activas, canceladas o finalizadas | 409; estudiante e historial conservados |
 | Los cuatro | Eliminar sin relaciones | DELETE de registros temporales; estudiante y docente primero, carrera despues y facultad al final | 200; GET posterior devuelve 404 |
 
+## Cursos, planes de estudio y prerrequisitos
+
+### Endpoints y columnas
+
+| Modulo | Ruta de coleccion | Identificador de la ruta individual | Campos de POST y PUT |
+| --- | --- | --- | --- |
+| Cursos | `/cursos` | `id_curso` | codigo (1 a 20 caracteres), nombre (1 a 150), descripcion opcional TEXT |
+| Planes de estudio | `/planes-estudio` | `id_plan_estudio` | id_carrera, id_curso, semestre_sugerido |
+| Prerrequisitos | `/prerrequisitos` | `id_prerrequisito` | id_curso, id_curso_requisito |
+
+Cada modulo tiene modelos, esquemas Crear/Actualizar/Respuesta, funciones
+database y router propio. Cada fila del plan representa un curso de una
+carrera, no un plan completo ni una version historica del plan.
+
+Para las tres colecciones: GET lista en orden del identificador y POST
+crea una fila (201). En `/{identificador}`: GET consulta (200), PUT
+actualiza todos los campos editables (200) y DELETE elimina (200).
+GET, PUT y DELETE devuelven 404 si la fila no existe.
+
+Las respuestas contienen todas las columnas de la fila, incluido el
+identificador. Los identificadores de entrada son enteros estrictos entre
+1 y 2147483647; no se aceptan booleanos, decimales ni numeros como texto.
+El semestre es un entero estricto entre 1 y 32767, segun SMALLINT y CHECK > 0.
+Los campos adicionales y los identificadores primarios en POST/PUT se
+rechazan con 422. PUT requiere todos los obligatorios; omitir la descripcion
+del curso la establece en null, como en los modulos existentes.
+
+### Operaciones permitidas y restricciones
+
+Las llaves primarias son los identificadores propios de cada tabla.
+`(id_carrera, id_curso)` en plan_estudio y `(id_curso, id_curso_requisito)`
+en prerrequisito son restricciones UNIQUE compuestas, no llaves primarias.
+Las solicitudes repetidas sobre esas combinaciones devuelven 409; tambien
+se comprueba la unicidad al actualizar.
+
+- Curso: se permiten cambios de codigo, nombre y descripcion. El codigo
+  debe ser unico. DELETE devuelve 409 si existen planes, secciones o
+  prerrequisitos donde el curso aparezca en cualquiera de los dos lados.
+- Plan: se permite modificar carrera, curso y semestre. Las reglas actuales
+  no declaran inmutables esas referencias; PostgreSQL valida el estado final.
+  INSERT, UPDATE y DELETE no pueden dejar cursos sin sus requisitos en el
+  mismo plan ni quitar un curso necesario para una asignacion no cancelada,
+  incluyendo resultados aprobados o reprobados. Esos rechazos devuelven 400.
+- Prerrequisito: se permite editar ambos cursos y eliminar la relacion.
+  Se rechazan autorreferencias y ciclos directos o indirectos con 400.
+  Cada requisito debe estar en todos los planes que ofrecen el curso.
+  Agregar o cambiar requisitos tampoco puede dejar una asignacion no
+  cancelada sin la aprobacion previa del requisito en un periodo anterior;
+  PostgreSQL rechaza estos cambios con 400.
+
+La eliminacion de un prerrequisito no esta prohibida por el mero hecho de
+existir historial: se permite si el estado resultante cumple las reglas.
+No se agregaron prohibiciones generales que no aparecen en el SQL.
+Las referencias inexistentes producen 409 y las FK no usan cascadas.
+Los identificadores primarios permanecen inmutables. No se exponen
+operaciones TRUNCATE ni operaciones para borrar el historial.
+
+La API no duplica en Python el recorrido de ciclos ni la comprobacion
+global de planes e historial. Todas las escrituras usan ejecutar_transaccion
+y los errores se traducen con traducir_error_database. Las reglas diferidas
+se comprueban durante COMMIT; un fallo deshace todos los cambios del intento.
+No se crean ni alteran tablas, triggers o reglas desde los modelos ORM.
+
+Cada escritura corresponde a una fila. Para preparar un plan, agregar los
+cursos base antes de los cursos que los requieren. Para agregar un nuevo
+prerrequisito a un curso ya ofrecido, incluir primero el requisito en todos
+los planes correspondientes. No se ofrece una operacion por lotes que
+cambie varias filas del plan y los requisitos en una misma solicitud.
+
+### Ejemplos JSON
+
+POST `/cursos` y PUT `/cursos/{id_curso}`:
+
+```json
+{
+  "codigo": "CUR-SW-01",
+  "nombre": "Programacion inicial",
+  "descripcion": "Curso base"
+}
+```
+
+POST `/planes-estudio` y PUT `/planes-estudio/{id_plan_estudio}`:
+
+```json
+{
+  "id_carrera": 1,
+  "id_curso": 1,
+  "semestre_sugerido": 1
+}
+```
+
+POST `/prerrequisitos` y PUT `/prerrequisitos/{id_prerrequisito}`:
+
+```json
+{
+  "id_curso": 2,
+  "id_curso_requisito": 1
+}
+```
+
+Sustituir los identificadores por registros existentes. El ultimo ejemplo
+significa que el curso 2 requiere aprobar previamente el curso 1.
+Los requisitos son comunes a todas las carreras que ofrecen el curso.
+
+### Tabla de pruebas para Swagger
+
+La ejecucion interactiva en Swagger esta pendiente. Preparar cursos
+temporales A, B y C, y una carrera de prueba; A -> B significa que A requiere B.
+Para casos de historial, usar relaciones existentes sin eliminar sus datos.
+
+| Modulo | Caso y preparacion | Resultado esperado |
+| --- | --- | --- |
+| Todos | POST valido; luego GET de coleccion y GET individual | 201 al crear; 200 al consultar |
+| Todos | PUT completo con cambios permitidos | 200; GET confirma los cambios |
+| Todos | DELETE sin referencias ni reglas que dependan de la fila | 200; GET posterior devuelve 404 |
+| Cursos | POST o PUT con codigo de otro curso | 409; rollback de los demas campos |
+| Planes | Repetir carrera y curso en POST o PUT | 409, aunque el semestre sea distinto |
+| Prerrequisitos | Repetir curso y requisito en POST o PUT | 409 |
+| Planes | Carrera o curso positivo inexistente en POST o PUT | 409 |
+| Prerrequisitos | Cualquiera de los dos cursos inexistente en POST o PUT | 409 |
+| Todos | GET, PUT completo o DELETE de identificador ausente | 404 |
+| Todos | Campo adicional, identificador primario o tipo invalido en POST/PUT | 422 |
+| Cursos | Codigo de 21 caracteres o nombre de 151 | 422 |
+| Planes | Semestre 0, 32768, booleano, decimal o texto | 422 |
+| Prerrequisitos | A -> A en POST o PUT | 400; relacion anterior conservada en PUT |
+| Prerrequisitos | Crear A -> B y luego B -> A | 400 para la segunda relacion |
+| Prerrequisitos | Crear A -> B, B -> C y luego C -> A; o formar un ciclo mediante PUT | 400 |
+| Planes | Con A -> B, agregar A a un plan que no tiene B | 400; no se guarda la fila |
+| Planes | Agregar B y luego A al mismo plan | 201 en ambas solicitudes |
+| Planes | Con A y B en el plan y A -> B, eliminar B o cambiar su carrera/curso | 400; fila y semestre anteriores conservados |
+| Prerrequisitos | Agregar o cambiar A -> C cuando falta C en uno de los planes de A | 400; ningun requisito nuevo se conserva |
+| Prerrequisitos | Incluir C en todos los planes de A y agregar A -> C, sin historial incompatible | 201 |
+| Planes | Eliminar o cambiar un curso del plan usado por asignaciones no canceladas | 400; asignaciones y plan conservados |
+| Prerrequisitos | Agregar o cambiar un requisito sin aprobacion previa para una asignacion existente, con planes completos | 400 por proteccion del historial |
+| Cursos | Eliminar un curso con plan, secciones o cualquiera de los lados de un prerrequisito | 409 |
+| Prerrequisitos | Eliminar una relacion dejando un estado valido | 200; no hay prohibicion general de eliminacion |
+
 ## Transacciones
 
 El motor utiliza aislamiento SERIALIZABLE.
@@ -283,3 +426,43 @@ Remove-Item Env:\PROBAR_POSTGRESQL
 Sin PROBAR_POSTGRESQL=1, las pruebas que usan la base se omiten.
 El ejecutor SQL selecciona solo bloques completos BEGIN/ROLLBACK;
 no ejecuta las secciones manuales de concurrencia ni instala DDL o reglas.
+
+### Verificacion de cursos, planes y prerrequisitos
+
+- Sintaxis de backend y carga de OpenAPI comprobadas; pip check no detecto
+  dependencias incompatibles.
+- Suite completa: 30 pruebas aprobadas, sin omisiones al activar PostgreSQL.
+  Las 18 nuevas incluyen 5 de esquemas/OpenAPI, 2 con errores simulados y
+  11 contra PostgreSQL real. Las 12 anteriores tambien pasaron.
+- Contra PostgreSQL: CRUD, unicidad compuesta al crear y actualizar,
+  referencias inexistentes, autorreferencias, ciclos directos e indirectos,
+  requisitos en todos los planes, rechazos de UPDATE/DELETE del plan,
+  y proteccion de asignaciones e historial ante nuevos requisitos.
+- La integracion usa una transaccion externa y savepoints. Antes de liberar
+  cada savepoint se fuerzan las comprobaciones diferidas de PostgreSQL.
+  El rollback externo descarta los datos; los conteos de las 17 tablas
+  permanecieron iguales antes y despues de repetir las 11 pruebas nuevas.
+- Los 14 bloques SQL automaticos de 01 y 02 aprobaron.
+- La verificacion 04 reporto cuatro diferencias respecto a la carga inicial:
+  facultad 3 frente a 2, carrera 3 frente a 2, docente 3 frente a 2 y
+  estudiante 9 frente a 8. No se corrigieron ni eliminaron esos datos.
+  Los otros 13 conteos coinciden y no hay resultados cerrados incoherentes.
+  El ejecutor SQL termina con codigo 1 por esas diferencias de conteo.
+
+Los errores en COMMIT y los 40001 de las pruebas unitarias se simulan;
+no son concurrencia real. Las pruebas con PostgreSQL comprueban sus
+restricciones reales, pero usan savepoints y no confirman datos permanentes.
+La interaccion HTTP desde Swagger y las pruebas manuales de concurrencia
+C1, C2 y 03_concurrencia_prerrequisitos.sql siguen pendientes.
+
+Para ejecutar solo las nuevas pruebas:
+
+```powershell
+$env:PROBAR_POSTGRESQL = '1'
+.\.venv\Scripts\python.exe -m unittest backend.tests.test_cursos_planes -v
+Remove-Item Env:\PROBAR_POSTGRESQL
+```
+
+Si PostgreSQL no esta disponible, omitir PROBAR_POSTGRESQL: las 11 pruebas
+de integracion nuevas quedan pendientes y se ejecutan las de esquemas y
+errores simulados. Los cambios no requieren modificar .env ni instalar DDL.
