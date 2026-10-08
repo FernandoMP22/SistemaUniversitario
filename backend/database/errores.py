@@ -10,7 +10,7 @@ def traducir_error_database(error):
             detail="Ya existe un registro con esos datos únicos.",
         )
 
-    if codigo == "23503":
+    if codigo in ("23503", "23001"):
         return HTTPException(
             status_code=409,
             detail=(
