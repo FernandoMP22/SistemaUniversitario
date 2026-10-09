@@ -5,9 +5,13 @@ from backend.routers.cursos import router as cursos_router
 from backend.routers.docentes import router as docentes_router
 from backend.routers.estudiantes import router as estudiantes_router
 from backend.routers.facultades import router as facultades_router
+from backend.routers.horarios_seccion import router as horarios_seccion_router
+from backend.routers.periodos_academicos import router as periodos_academicos_router
 from backend.routers.planes_estudio import router as planes_estudio_router
 from backend.routers.prerrequisitos import router as prerrequisitos_router
 from backend.routers.salud import router as salud_router
+from backend.routers.salones import router as salones_router
+from backend.routers.secciones import router as secciones_router
 from backend.routers.sedes import router as sedes_router
 
 
@@ -26,3 +30,7 @@ app.include_router(estudiantes_router)
 app.include_router(cursos_router)
 app.include_router(planes_estudio_router)
 app.include_router(prerrequisitos_router)
+app.include_router(periodos_academicos_router)
+app.include_router(salones_router)
+app.include_router(secciones_router)
+app.include_router(horarios_seccion_router)

@@ -4,6 +4,12 @@ from fastapi import HTTPException
 def traducir_error_database(error):
     codigo = error.orig.sqlstate
 
+    if codigo == "23P01":
+        return HTTPException(
+            status_code=409,
+            detail="Las fechas se superponen con otro período académico.",
+        )
+
     if codigo == "23505":
         return HTTPException(
             status_code=409,
