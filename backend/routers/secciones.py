@@ -5,6 +5,7 @@ from backend.database.conexion import SessionLocal
 from backend.database.errores import traducir_error_database
 from backend.database.secciones import (
     actualizar_seccion,
+    cerrar_calificaciones,
     crear_seccion,
     eliminar_seccion,
     obtener_seccion,
@@ -13,6 +14,7 @@ from backend.database.secciones import (
 from backend.database.transacciones import ejecutar_transaccion
 from backend.schemas.seccion import (
     SeccionActualizar,
+    SeccionCerrar,
     SeccionCrear,
     SeccionRespuesta,
 )
@@ -107,3 +109,24 @@ def borrar_seccion(id_seccion: int):
 
     return {"mensaje": "Sección eliminada correctamente."}
 
+
+@router.post("/{id_seccion}/cerrar-calificaciones", response_model=SeccionRespuesta)
+def cerrar_calificaciones_seccion(id_seccion: int, datos: SeccionCerrar | None = None):
+    def operacion(session):
+        seccion = cerrar_calificaciones(id_seccion, session)
+
+        if seccion is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Sección no encontrada.",
+            )
+
+        return seccion
+
+    try:
+        seccion = ejecutar_transaccion(operacion)
+
+    except DBAPIError as error:
+        raise traducir_error_database(error) from error
+
+    return seccion

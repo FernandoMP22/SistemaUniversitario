@@ -72,6 +72,10 @@ Swagger: http://127.0.0.1:8000/docs
 - Inscripciones: registro por estudiante y periodo, consulta y cambios de estado.
 - Asignaciones de cursos: registro y cancelacion/reactivacion, conservando resultados.
 - Pagos: registro de matriculas/mensualidades, consulta y anulacion sin borrar historial.
+- Actividades academicas: evaluaciones por seccion, con fechas y puntajes protegidos.
+- Calificaciones: puntajes por actividad y asignacion, editables antes del cierre.
+- Cierre de seccion: operacion academica que invoca la funcion PostgreSQL existente.
+- Historial academico: consulta por estudiante de todos sus intentos y resultados.
 
 Cada modulo mantiene archivos separados en models, schemas, database
 y routers. Los routers de los modulos estan registrados en main.py.
@@ -429,8 +433,8 @@ SQLAlchemy ni se modifican triggers o reglas.
 
 calificaciones_cerradas aparece en SeccionRespuesta como dato de consulta,
 marcado readOnly en OpenAPI. SeccionCrear y SeccionActualizar no lo reciben:
-enviarlo, incluso como false, produce 422. No hay endpoint de cierre en
-este CRUD; esa operacion academica corresponde a un bloque posterior.
+enviarlo, incluso como false, produce 422. El cierre se realiza mediante
+POST /secciones/{id_seccion}/cerrar-calificaciones, descrito mas adelante.
 
 ### Ejemplos JSON
 
@@ -617,8 +621,8 @@ de los registros relacionados antes de confirmar.
 
 Enviar referencias, fechas u otros campos inmutables en PUT devuelve 422,
 incluso si coinciden con los actuales. Enviar aprobada/reprobada en el CRUD
-de asignaciones tambien devuelve 422. El cierre academico se implementara
-en un bloque posterior; no hay ningun endpoint que lo invoque aqui.
+de asignaciones tambien devuelve 422. Los resultados finales los establece
+el cierre academico mediante POST /secciones/{id_seccion}/cerrar-calificaciones.
 PostgreSQL tambien impide borrados directos de inscripciones, asignaciones
 y pagos, incluso sin relaciones, para conservar el historial.
 
@@ -750,6 +754,195 @@ exitosas; conservar los registros anteriores de Swagger y el poblado.
 | Anulacion y reemplazo | Anular matricula de prueba y registrar otra con comprobante nuevo | 200 y 201; ambas filas conservadas |
 | Historial y metodos restringidos | PUT cancelada sobre resultado final cerrado; DELETE individual de cualquiera de los tres modulos | 400 para resultado protegido; 405 para DELETE |
 
+## Actividades academicas, calificaciones, cierre e historial
+
+### Endpoints y campos editables
+
+| Modulo | Endpoint | Operaciones y campos |
+| --- | --- | --- |
+| Actividades academicas | `/actividades-academicas` | GET listado; POST con id_seccion, nombre, tipo, fecha y puntaje_maximo |
+| Actividad individual | `/actividades-academicas/{id_actividad_academica}` | GET; PUT completo con nombre, tipo, fecha y puntaje_maximo; DELETE si no tiene notas y la seccion esta abierta |
+| Calificaciones | `/calificaciones` | GET listado; POST con id_actividad_academica, id_asignacion_curso y puntaje_obtenido |
+| Calificacion individual | `/calificaciones/{id_calificacion}` | GET; PUT con puntaje_obtenido; DELETE antes del cierre |
+| Cierre de seccion | `/secciones/{id_seccion}/cerrar-calificaciones` | POST sin cuerpo o con `{}`; no admite campos editables |
+| Historial por estudiante | `/estudiantes/{id_estudiante}/historial-academico` | GET; lista de intentos del estudiante, incluidos cursos en progreso y cancelados |
+
+POST de actividades y notas devuelve 201. GET, PUT, DELETE y cierre exitoso
+devuelven 200. DELETE devuelve un mensaje, sin cascadas. Un registro individual
+inexistente devuelve 404, incluida la seccion al cerrar y el estudiante al
+consultar su historial. Las colecciones vacias devuelven `[]`.
+
+Las entradas rechazan campos adicionales (422). Los identificadores de
+referencia deben ser enteros positivos hasta 2147483647; no aceptan booleanos,
+decimales ni numeros como texto. Los identificadores primarios los genera
+PostgreSQL. No se reciben nota_final, resultados aprobada/reprobada ni
+calificaciones_cerradas como campos editables.
+
+El nombre de una actividad tiene entre 1 y 150 caracteres. El tipo admite
+exactamente tarea, proyecto, examen u otra, sin tildes. La fecha es DATE y
+se exige en creacion y actualizacion; debe estar entre las fechas del periodo,
+incluidos ambos extremos. El esquema de actualizacion no admite id_seccion.
+No existe una llave unica para el nombre de actividad: repetir un nombre
+en la misma seccion esta permitido si cumple las otras reglas.
+
+puntaje_maximo y puntaje_obtenido usan Decimal y NUMERIC(5,2), con hasta dos
+decimales y cinco digitos. El maximo debe ser mayor que 0 y hasta 100;
+el obtenido admite 0 hasta 100. No aceptan valores no finitos. Los puntajes
+se representan como cadenas decimales en las respuestas JSON, conservando
+la precision. Los limites de esquema producen 422; PostgreSQL comprueba
+ademas que cada nota no supere el maximo de su actividad (400).
+
+### Reglas de actividades y calificaciones
+
+- La suma de puntajes maximos de las actividades de una seccion no puede
+  superar 100. La comprobacion SQL puede rechazar la escritura al confirmar
+  la transaccion; el cambio completo se revierte.
+- Antes del cierre se pueden cambiar nombre, tipo, fecha y puntaje_maximo
+  de una actividad. No se puede trasladar a otra seccion ni reducir su
+  maximo por debajo de una nota existente. Si tiene calificaciones, eliminarla
+  produce 409 por la relacion protegida.
+- La actividad y la asignacion de una calificacion deben corresponder a la
+  misma seccion (400). La pareja actividad/asignacion es unica (409).
+  Las referencias inexistentes producen 409. En PUT solo se cambia el puntaje;
+  las referencias de la nota permanecen inmutables.
+- No se pueden crear ni modificar calificaciones de asignaciones canceladas.
+  Las notas existentes se conservan al cancelar la asignacion. El SQL permite
+  eliminarlas mientras la seccion este abierta; DELETE no reactiva el curso.
+- Despues del cierre PostgreSQL bloquea creacion, modificacion y eliminacion
+  de actividades y calificaciones (400). Tambien conserva los resultados
+  aprobada/reprobada y las protecciones existentes de secciones y asignaciones.
+
+### Cierre de calificaciones
+
+El endpoint invoca `public.cerrar_calificaciones(p_id_seccion integer)`,
+que devuelve void. La funcion y los triggers existentes calculan y validan
+el cierre. Python comprueba la existencia de la seccion, invoca la funcion
+y vuelve a cargar la fila para responder con SeccionRespuesta y
+calificaciones_cerradas en true. No calcula resultados ni replica las reglas.
+
+PostgreSQL exige que las actividades sumen exactamente 100 y que cada
+asignacion cursando tenga una calificacion por cada actividad. Una nota
+faltante no se convierte en cero: para asignar cero se debe registrar
+explicitamente. La suma final de 61 o mas produce aprobada; un valor menor
+produce reprobada. Las asignaciones canceladas quedan canceladas y no
+requieren completar notas para el cierre. Una seccion sin asignaciones puede
+cerrar si sus actividades suman 100. Cerrar no finaliza las inscripciones.
+
+Una seccion ya cerrada o un cierre incompatible con las reglas academicas
+produce 400. Las reglas diferidas tambien pueden rechazar el cierre, por
+ejemplo si aprobar un curso invalida un intento posterior ya registrado.
+Ante cualquier rechazo se revierten el cierre y los resultados relacionados.
+Una seccion inexistente devuelve 404. Enviar campos en el cuerpo devuelve
+422, incluso calificaciones_cerradas. No existe una operacion de reapertura.
+
+El cierre y las seis escrituras de actividades/calificaciones utilizan
+ejecutar_transaccion, SERIALIZABLE, rollback y hasta tres intentos por 40001.
+Los routers traducen los errores de PostgreSQL, incluidos los del commit.
+Un 40001 persistente devuelve 503. No se modifican tablas, triggers ni funciones.
+
+### Ejemplos JSON
+
+Sustituir los identificadores por los de una seccion abierta, su periodo
+y una asignacion cursando de esa misma seccion. Elegir una fecha dentro
+del periodo y comprobar las actividades actuales antes de agregar 100 puntos.
+
+POST `/actividades-academicas`:
+
+```json
+{
+  "id_seccion": 1,
+  "nombre": "Evaluacion final",
+  "tipo": "examen",
+  "fecha": "2027-05-20",
+  "puntaje_maximo": "100.00"
+}
+```
+
+PUT `/actividades-academicas/{id_actividad_academica}` utiliza los mismos
+campos excepto id_seccion. POST `/calificaciones`:
+
+```json
+{
+  "id_actividad_academica": 1,
+  "id_asignacion_curso": 1,
+  "puntaje_obtenido": "61.00"
+}
+```
+
+PUT `/calificaciones/{id_calificacion}`:
+
+```json
+{
+  "puntaje_obtenido": "60.99"
+}
+```
+
+POST `/secciones/{id_seccion}/cerrar-calificaciones` no requiere cuerpo;
+si Swagger ofrece un cuerpo, enviar `{}`. Responde con la seccion completa,
+incluidos sus identificadores, codigo, cupo_maximo y calificaciones_cerradas.
+
+### Consulta del historial
+
+GET `/estudiantes/{id_estudiante}/historial-academico` incluye una fila por
+asignacion de curso del estudiante, en todos sus periodos y estados de
+inscripcion. Conserva intentos reprobados repetidos y asignaciones canceladas.
+Ordena por fecha_inicio del periodo y luego id_asignacion_curso. Una inscripcion
+sin asignaciones no produce filas. No incluye cursos solamente ofertados ni
+elimina intentos repetidos para presentar un unico resultado por curso.
+
+nota_final es la suma de las calificaciones unicamente cuando la seccion
+esta cerrada y la asignacion esta aprobada/reprobada. Para cursando o
+cancelada es null, aunque existan notas o ya sumen 100. resultado conserva
+el estado real de la asignacion; no se presenta una suma parcial como final.
+El estado de la inscripcion se consulta por separado, sin inferirlo del cierre.
+Un estudiante existente sin asignaciones devuelve `[]`; uno inexistente, 404.
+
+Ejemplo de una fila final dentro de la lista de respuesta:
+
+```json
+[
+  {
+    "id_estudiante": 1,
+    "id_inscripcion": 1,
+    "estado_inscripcion": "activa",
+    "id_asignacion_curso": 1,
+    "id_curso": 1,
+    "codigo_curso": "MAT-01",
+    "nombre_curso": "Matematica",
+    "id_periodo_academico": 1,
+    "codigo_periodo": "P-SW-2027",
+    "nombre_periodo": "Primer periodo 2027",
+    "fecha_inicio": "2027-01-11",
+    "fecha_fin": "2027-05-28",
+    "id_seccion": 1,
+    "codigo_seccion": "A",
+    "calificaciones_cerradas": true,
+    "nota_final": "61.00",
+    "resultado": "aprobada"
+  }
+]
+```
+
+La consulta utiliza las tablas actuales y una suma agrupada por asignacion;
+no crea tablas de historial ni requiere una capa services adicional.
+
+### Conjunto minimo para Swagger
+
+Estos casos HTTP interactivos quedan pendientes. Usar una seccion nueva con
+dos asignaciones cursando, sin actividades previas. Conservar los registros
+de Swagger anteriores y el poblado. La matriz completa de restricciones
+esta cubierta por las pruebas automaticas; este recorrido revisa el contrato
+HTTP y el flujo principal con pocas solicitudes.
+
+| Caso | Solicitudes | Resultado esperado |
+| --- | --- | --- |
+| Actividad y referencia ausente | POST actividad de 100 puntos; GET individual; POST con id_seccion inexistente | 201 y 200; referencia inexistente 409 |
+| Nota y duplicado | POST nota 61.00 para el primer alumno; repetir actividad/asignacion; PUT con 100.001 | 201; duplicado 409; precision invalida 422; nota original conservada |
+| Cierre rechazado | POST cerrar con notas pendientes para el segundo alumno; GET seccion y primer historial | 400; seccion abierta, resultado cursando y nota_final null |
+| Cierre valido | POST nota 60.99 del segundo alumno; POST cerrar; GET ambos historiales | 201 y 200; aprobada con 61.00, reprobada con 60.99 y seccion cerrada |
+| Proteccion posterior | PUT de una nota cerrada y DELETE de su actividad; repetir POST cerrar | 400; notas, actividades y resultados conservados |
+| Historial sin registros | GET historial de estudiante existente sin asignaciones y de identificador inexistente | 200 con []; 404 para el inexistente |
+
 ## Transacciones
 
 El motor utiliza aislamiento SERIALIZABLE.
@@ -880,7 +1073,7 @@ errores simulados. Los cambios no requieren modificar .env ni instalar DDL.
 
 ### Verificacion de oferta academica
 
-- Suite completa actual: 57 pruebas aprobadas, sin omisiones con
+- Suite de ese bloque: 57 pruebas aprobadas, sin omisiones con
   PROBAR_POSTGRESQL=1. Las 30 anteriores pasaron junto con las 27 nuevas:
   6 de esquemas/OpenAPI, 2 de errores simulados y 19 contra PostgreSQL real.
 - Sintaxis de Python y carga de OpenAPI comprobadas. Las seis dependencias
@@ -901,7 +1094,7 @@ errores simulados. Los cambios no requieren modificar .env ni instalar DDL.
   movimientos hacia secciones cerradas, cambios de fechas del periodo y
   de sede del salon. Las notas y el resultado aprobado se conservaron.
   La funcion SQL existente de cierre se utiliza solo para preparar ese
-  historial temporal; no se implementa su endpoint.
+  historial temporal; en ese bloque no se implemento su endpoint.
 - Los tests de integracion invocan los routers dentro de savepoints de una
   transaccion SERIALIZABLE externa. Se fuerzan SET CONSTRAINTS ALL IMMEDIATE
   antes de liberar cada savepoint para ejecutar las reglas diferidas reales.
@@ -922,7 +1115,7 @@ errores simulados. Los cambios no requieren modificar .env ni instalar DDL.
 Quedan pendientes las solicitudes HTTP interactivas de la tabla de Swagger
 y las pruebas de concurrencia C1, C2 y 03 en sesiones independientes.
 Los resultados de verificacion de bloques anteriores son historicos;
-la suite actual y el estado del poblado son los indicados en esta seccion.
+la suite actual y el estado del poblado se indican en la ultima seccion.
 
 Para repetir solo las pruebas de oferta academica:
 
@@ -961,7 +1154,7 @@ las 8 nuevas de esquemas y errores simulados pueden ejecutarse sin conexion.
   planes, horarios y prerrequisitos modificados mientras la fila esta cancelada.
 - Se comprobaron resultados aprobados/reprobados inmutables, secciones
   cerradas y notas conservadas. La funcion SQL existente de cierre solo
-  prepara ese historial dentro de las pruebas, sin agregar un endpoint.
+  prepara ese historial dentro de las pruebas; ese bloque no agrego su endpoint.
   El SQL directo tambien rechazo cambios de identidad y eliminaciones de
   inscripciones, asignaciones y pagos, asi como reactivacion de pagos anulados.
 - Se comprobo que asignar no exige pagos de matricula, que anular pagos
@@ -987,7 +1180,7 @@ las 8 nuevas de esquemas y errores simulados pueden ejecutarse sin conexion.
 La ejecucion interactiva HTTP del conjunto minimo de Swagger y las pruebas
 de concurrencia C1, C2 y 03 en sesiones independientes siguen pendientes.
 Los resultados de secciones anteriores corresponden a sus respectivos
-bloques; la suite actual es la de 86 pruebas indicada aqui.
+bloques; la suite actual se indica en la ultima seccion.
 
 Para repetir solo las pruebas nuevas:
 
@@ -1000,3 +1193,69 @@ Remove-Item Env:\PROBAR_POSTGRESQL
 Sin PostgreSQL, ejecutar sin PROBAR_POSTGRESQL: pasan a pendientes las
 20 pruebas nuevas de integracion y los bloques SQL. Las 9 nuevas de
 esquemas y errores simulados pueden ejecutarse sin conexion.
+
+### Verificacion de actividades, calificaciones, cierre e historial
+
+- Suite completa actual: 110 pruebas aprobadas sin omisiones con
+  PROBAR_POSTGRESQL=1. Las 86 anteriores pasaron junto con 24 nuevas:
+  4 de esquemas/OpenAPI, 2 de errores simulados y 18 contra PostgreSQL real.
+- Sintaxis Python, carga de OpenAPI (38 rutas), dependencias y revision
+  de espacios con git diff --check comprobadas. Las seis versiones
+  instaladas coinciden con requirements.txt; pip check no detecto
+  incompatibilidades. Las pruebas usan unittest, sin nuevas dependencias.
+- Los esquemas comprueban precision, escala, limites, valores finitos,
+  longitudes, catalogos, fechas validas y tipos INTEGER. Rechazan campos
+  adicionales, referencias inmutables y campos de resultados o cierre.
+- Contra PostgreSQL se comprobaron CRUD, referencias y filas ausentes,
+  nombres de actividades repetidos permitidos, notas duplicadas,
+  incompatibilidad entre secciones y limites por actividad. Tambien fechas
+  inclusivas del periodo, suma maxima de 100, rollback de cambios rechazados
+  y eliminacion restringida de actividades con notas.
+- Se comprobo el rechazo de notas nuevas o modificadas en asignaciones
+  canceladas y la eliminacion permitida de sus notas antes del cierre.
+  Despues del cierre se rechazaron las seis escrituras de actividades/notas
+  y los cambios de resultados finales, conservando los datos anteriores.
+- El endpoint real de cierre rechazo sumas distintas de 100 y notas
+  pendientes. Cerro correctamente con notas finales 61.00 (aprobada),
+  60.99 y 0.00 (reprobada), conservando las asignaciones canceladas.
+  Se verificaron secciones sin alumnos, cierre repetido y seccion inexistente.
+- Una validacion diferida real rechazo el cierre al aprobar un curso con
+  un intento posterior vigente. Se revirtieron calificaciones_cerradas y
+  ambos resultados del cierre; las notas y el intento posterior se conservaron.
+  Tras cancelar ese intento, el mismo cierre pudo completarse.
+- El historial devuelve 404 para estudiante inexistente y [] para existente
+  sin asignaciones, incluso si tiene inscripcion. Se comprobaron identificadores,
+  curso, periodo, seccion, intentos repetidos, orden cronologico, resultados
+  finales y nota_final null para cursos en progreso o cancelados.
+- La integracion invoca los routers usando savepoints dentro de transacciones
+  SERIALIZABLE externas. Antes de liberar cada savepoint fuerza las reglas
+  diferidas mediante SET CONSTRAINTS ALL IMMEDIATE. Cada prueba termina con
+  rollback externo. Los conteos de las 17 tablas fueron iguales antes y
+  despues de la suite: no se eliminaron registros conservados de Swagger.
+  Las secuencias pueden avanzar aunque las filas temporales se descarten.
+- Los errores del commit y los reintentos 40001 de las dos pruebas unitarias
+  nuevas son simulados. Se comprobaron traduccion, rollback y tres intentos
+  completos del cierre; no constituyen concurrencia real. La integracion
+  comprueba las reglas PostgreSQL con savepoints, sin confirmar datos permanentes.
+- Los 14 bloques SQL automaticos de 01 y 02 aprobaron. El verificador 04
+  muestra siete diferencias del poblado conservado: asignacion_curso 9 frente
+  a 8, carrera/docente/facultad 3 frente a 2 cada una, estudiante e inscripcion
+  9 frente a 8 y pago 11 frente a 9. Los otros 10 conteos coinciden y hay
+  cero resultados cerrados incoherentes. Por esas diferencias el ejecutor
+  SQL termina con codigo 1; no se ajustaron los conteos esperados ni los datos.
+
+Quedan pendientes el recorrido HTTP interactivo de Swagger y las pruebas
+de concurrencia C1, C2 y 03 en sesiones independientes. Los resultados de
+las secciones anteriores son historicos; la suite actual es la de 110 pruebas.
+
+Para repetir solo las pruebas nuevas:
+
+```powershell
+$env:PROBAR_POSTGRESQL = '1'
+.\.venv\Scripts\python.exe -m unittest backend.tests.test_calificaciones_cierre -v
+Remove-Item Env:\PROBAR_POSTGRESQL
+```
+
+Sin PostgreSQL, ejecutar sin PROBAR_POSTGRESQL: las 18 nuevas pruebas de
+integracion y los bloques SQL quedan pendientes. Las 6 nuevas de esquemas
+y errores simulados pueden ejecutarse sin conexion.
