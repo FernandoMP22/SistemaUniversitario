@@ -1,12 +1,15 @@
 from fastapi import FastAPI
 
+from backend.routers.actividades_academicas import router as actividades_academicas_router
 from backend.routers.asignaciones_cursos import router as asignaciones_cursos_router
+from backend.routers.calificaciones import router as calificaciones_router
 from backend.routers.carreras import router as carreras_router
 from backend.routers.cursos import router as cursos_router
 from backend.routers.docentes import router as docentes_router
 from backend.routers.estudiantes import router as estudiantes_router
 from backend.routers.facultades import router as facultades_router
 from backend.routers.horarios_seccion import router as horarios_seccion_router
+from backend.routers.historial_academico import router as historial_academico_router
 from backend.routers.inscripciones import router as inscripciones_router
 from backend.routers.pagos import router as pagos_router
 from backend.routers.periodos_academicos import router as periodos_academicos_router
@@ -40,3 +43,6 @@ app.include_router(horarios_seccion_router)
 app.include_router(inscripciones_router)
 app.include_router(asignaciones_cursos_router)
 app.include_router(pagos_router)
+app.include_router(actividades_academicas_router)
+app.include_router(calificaciones_router)
+app.include_router(historial_academico_router)

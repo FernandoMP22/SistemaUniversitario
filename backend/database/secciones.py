@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from backend.models.seccion import Seccion
 
@@ -70,3 +70,26 @@ def eliminar_seccion(id_seccion, session):
 
     return True
 
+
+def cerrar_calificaciones(id_seccion, session):
+    consulta = select(Seccion).where(
+        Seccion.id_seccion == id_seccion
+    ).with_for_update()
+
+    resultado = session.execute(consulta)
+
+    seccion = resultado.scalars().first()
+
+    if seccion is None:
+        return None
+
+    # PostgreSQL valida el cierre y actualiza los resultados de las asignaciones.
+    session.execute(
+        text("SELECT public.cerrar_calificaciones(:id_seccion)"),
+        {"id_seccion": id_seccion},
+    )
+
+    # El SQL de la funcion modifica la fila fuera del estado cargado por el ORM.
+    session.refresh(seccion)
+
+    return seccion
