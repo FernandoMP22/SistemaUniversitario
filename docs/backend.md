@@ -69,6 +69,9 @@ Swagger: http://127.0.0.1:8000/docs
 - Salones: sede, codigo y capacidad compatibles con sus secciones.
 - Secciones: oferta de cursos por periodo y docente, cupos e historial protegido.
 - Horarios de seccion: bloques por dia y salon, sin cruces ni cambios sobre cierres.
+- Inscripciones: registro por estudiante y periodo, consulta y cambios de estado.
+- Asignaciones de cursos: registro y cancelacion/reactivacion, conservando resultados.
+- Pagos: registro de matriculas/mensualidades, consulta y anulacion sin borrar historial.
 
 Cada modulo mantiene archivos separados en models, schemas, database
 y routers. Los routers de los modulos estan registrados en main.py.
@@ -536,6 +539,217 @@ solo a filas nuevas creadas expresamente para ese caso.
 | Horarios | Agregar otro bloque valido y luego borrar el bloque anterior de una fila de prueba | 201 y 200 |
 | Periodos/Salones/Secciones | DELETE con secciones/inscripciones, horarios o asignaciones/actividades relacionados | 409; filas relacionadas conservadas |
 
+## Inscripciones, asignaciones de cursos y pagos
+
+### Endpoints y esquemas
+
+Los tres modulos mantienen models, schemas, database y routers separados,
+con esquemas Crear/Actualizar/Respuesta. Estan registrados en main.py.
+
+| Modulo | Coleccion | Ruta individual | Campos de creacion |
+| --- | --- | --- | --- |
+| Inscripciones | `/inscripciones` | `/inscripciones/{id_inscripcion}` | id_estudiante, id_periodo_academico, fecha_inscripcion opcional |
+| Asignaciones | `/asignaciones-cursos` | `/asignaciones-cursos/{id_asignacion_curso}` | id_inscripcion, id_seccion, fecha_asignacion opcional |
+| Pagos | `/pagos` | `/pagos/{id_pago}` | id_inscripcion, numero_comprobante, concepto, monto, fecha_pago opcional, anio_mensualidad y mes_mensualidad segun concepto |
+
+GET en la coleccion lista por identificador; POST crea y devuelve 201.
+GET individual consulta y PUT individual actualiza solo el estado (200).
+GET individual y PUT devuelven 404 para un identificador ausente.
+No se ofrecen DELETE ni operaciones para trasladar registros, cambiar notas
+finales o cerrar calificaciones. Una solicitud DELETE a una ruta individual
+existente devuelve 405 porque ese metodo no forma parte de la API.
+
+Las respuestas incluyen todas las columnas de cada tabla. En asignaciones,
+aprobada y reprobada son resultados de consulta; no son opciones de entrada.
+No se agrega ni almacena nota_final en asignacion_curso.
+
+Todos los esquemas de entrada rechazan campos adicionales (422).
+Los identificadores primarios se generan en PostgreSQL. Las referencias
+son enteros estrictos de 1 a 2147483647, sin booleanos, decimales o textos.
+Las fechas usan YYYY-MM-DD. Omitir la fecha al crear, o enviarla como null,
+utiliza CURRENT_DATE de PostgreSQL; tambien puede indicarse una fecha valida
+al crear. La fecha almacenada siempre tiene valor y luego es inmutable.
+El SQL actual no obliga a que estas fechas de registro esten dentro del
+periodo ni impide fechas futuras; no se agregan esas restricciones.
+
+No se recibe estado en POST, ni siquiera el estado inicial correcto:
+PostgreSQL establece activa, cursando o registrado segun la tabla.
+PUT recibe un unico campo obligatorio, estado. Los valores de catalogo se
+escriben en minusculas y sin tildes.
+
+### Estados y campos inmutables
+
+| Modulo | Estados que acepta PUT | Campos conservados |
+| --- | --- | --- |
+| Inscripciones | activa, cancelada, finalizada | identificador, estudiante, periodo y fecha_inscripcion |
+| Asignaciones | cursando, cancelada | identificador, inscripcion, seccion y fecha_asignacion |
+| Pagos | anulado | identificador y todos los datos originales del pago |
+
+Las opciones del esquema son estados solicitables, no permisos para saltar
+las transiciones SQL. PostgreSQL comprueba el estado original y la integridad
+de los registros relacionados antes de confirmar.
+
+- Inscripcion: la combinacion estudiante/periodo es unica, incluso si la
+  fila anterior esta cancelada o finalizada (409). Se puede cancelar una
+  inscripcion no finalizada: el trigger cancela atomicamente sus asignaciones
+  cursando. Los resultados aprobados/reprobados y los pagos se conservan.
+  Una cancelada puede volver a activa; sus cursos permanecen cancelados
+  hasta reactivarlos individualmente. Se puede finalizar cuando no hay
+  cursos cursando; no se exige tener cursos ni que termine el calendario
+  del periodo. Finalizar con cursos pendientes devuelve 400. Una finalizada
+  no puede cambiar a activa ni cancelada (400).
+- Asignacion: comienza cursando y requiere inscripcion activa y seccion
+  abierta. Cancelar conserva la fila y sus calificaciones existentes,
+  libera cupo y deja de contar para cruces y duplicidad de curso vigente.
+  Reactivar utiliza la misma fila; vuelve a exigir inscripcion activa,
+  curso en el plan, prerrequisitos aprobados en periodos anteriores,
+  curso no aprobado previamente, cupo, horario y ausencia de cruces.
+  La combinacion inscripcion/seccion sigue siendo unica al cancelar (409);
+  no se crea otra fila para reactivarla. Se conservan los intentos reprobados.
+  Las asignaciones aprobadas/reprobadas no cambian de estado (400) y las
+  canceladas de secciones cerradas no se reactivan (400).
+- Pago: comienza registrado. Solo se permite anularlo y conservar sus
+  datos; para corregir importe, concepto, comprobante, fecha o inscripcion,
+  anular y registrar otro pago con un comprobante nuevo. No hay reactivacion
+  de pagos anulados. Repetir la anulacion de una fila ya anulada devuelve 200
+  sin cambiar su contenido, igual que repetir el estado actual permitido
+  en una inscripcion o asignacion sin modificar sus datos.
+
+Enviar referencias, fechas u otros campos inmutables en PUT devuelve 422,
+incluso si coinciden con los actuales. Enviar aprobada/reprobada en el CRUD
+de asignaciones tambien devuelve 422. El cierre academico se implementara
+en un bloque posterior; no hay ningun endpoint que lo invoque aqui.
+PostgreSQL tambien impide borrados directos de inscripciones, asignaciones
+y pagos, incluso sin relaciones, para conservar el historial.
+
+### Reglas academicas y financieras
+
+La seccion y la inscripcion deben tener el mismo periodo. El curso debe
+estar en el plan de la carrera del estudiante y tener horario. No se permite
+superar el cupo, asignar dos secciones vigentes del mismo curso en un periodo
+ni cruzar horarios del estudiante. Las asignaciones aprobadas/reprobadas
+tambien cuentan como no canceladas para cupos y conflictos.
+Los prerrequisitos deben estar aprobados con notas cerradas y fecha_fin
+anterior a fecha_inicio del periodo de la nueva seccion; aprobar en el mismo
+periodo no basta. Los intentos reprobados permiten repetir el curso, mientras
+que un curso ya aprobado no vuelve a asignarse. Estos rechazos SQL producen 400.
+
+Los pagos son independientes de las asignaciones: ni el DDL ni las reglas
+instaladas exigen matricula pagada para inscribir, asignar o reactivar cursos.
+Anular una matricula tampoco cancela cursos ni modifica resultados.
+El SQL permite registrar pagos para inscripciones canceladas o finalizadas.
+No se agregaron bloqueos por deudas ni calculos de cuotas pendientes.
+
+numero_comprobante exige de 1 a 50 caracteres y es unico entre todos los
+pagos, incluidos anulados (409). monto usa Decimal y NUMERIC(10,2):
+debe ser mayor que cero y no superar 99999999.99, con hasta dos posiciones
+decimales; excesos de precision/escala y valores no finitos producen 422.
+No se redondean importes invalidos para hacerlos aceptables. Para conservar
+la precision al enviar JSON se recomienda usar una cadena, por ejemplo
+"150.25". La respuesta JSON tambien representa monto como cadena decimal.
+
+concepto acepta matricula o mensualidad. Para matricula, anio_mensualidad y
+mes_mensualidad deben ser null u omitirse. Para mensualidad, ambos son
+obligatorios: anio es entero estricto de 1 a 32767 y mes de 1 a 12.
+La incoherencia del concepto con estos campos produce 422; PostgreSQL
+conserva tambien su CHECK. El mes de la mensualidad debe intersectar las
+fechas del periodo de la inscripcion; los meses inicial y final pueden ser
+parciales. Un mes ajeno al periodo produce 400, incluso para datos que luego
+se anulan. No se impone una relacion adicional entre fecha_pago y dicho mes.
+
+Solo existe una matricula registrada por inscripcion y una mensualidad
+registrada por inscripcion/anio/mes. Los indices unicos parciales producen
+409 si se repiten. Anular permite un reemplazo con comprobante nuevo,
+conservando la fila anulada. Referencias inexistentes producen 409.
+Los modelos no crean esos indices, tablas ni triggers.
+
+Las escrituras usan ejecutar_transaccion con SERIALIZABLE, rollback y
+hasta tres intentos por 40001. Los routers traducen errores de flush y
+commit mediante traducir_error_database. Las validaciones diferidas y la
+cancelacion de cursos se confirman o se deshacen junto con la operacion.
+
+### Ejemplos JSON
+
+Sustituir los identificadores por los devueltos por la API. Preparar un
+estudiante cuya carrera incluya el curso, un periodo y una seccion abierta
+con horario, cupo y prerrequisitos satisfechos. No reutilizar comprobantes.
+
+POST `/inscripciones`:
+
+```json
+{
+  "id_estudiante": 1,
+  "id_periodo_academico": 3
+}
+```
+
+POST `/asignaciones-cursos`:
+
+```json
+{
+  "id_inscripcion": 10,
+  "id_seccion": 6
+}
+```
+
+POST `/pagos`, matricula:
+
+```json
+{
+  "id_inscripcion": 10,
+  "numero_comprobante": "MAT-SW-01",
+  "concepto": "matricula",
+  "monto": "150.25"
+}
+```
+
+POST `/pagos`, mensualidad de un periodo que incluya junio de 2027:
+
+```json
+{
+  "id_inscripcion": 10,
+  "numero_comprobante": "MEN-SW-01",
+  "concepto": "mensualidad",
+  "monto": "350.00",
+  "fecha_pago": "2027-06-20",
+  "anio_mensualidad": 2027,
+  "mes_mensualidad": 6
+}
+```
+
+PUT `/inscripciones/{id_inscripcion}` o
+`/asignaciones-cursos/{id_asignacion_curso}` para cancelar:
+
+```json
+{"estado": "cancelada"}
+```
+
+Para reactivar una inscripcion usar activa; para reactivar su asignacion
+cancelada usar cursando. Para finalizar una inscripcion sin cursos pendientes
+usar finalizada. PUT `/pagos/{id_pago}`:
+
+```json
+{"estado": "anulado"}
+```
+
+### Conjunto minimo de pruebas en Swagger
+
+Estos casos HTTP interactivos quedan pendientes. La matriz academica y
+financiera completa se comprueba automaticamente; aqui se revisa el contrato
+HTTP y los flujos principales. Utilizar registros nuevos para las escrituras
+exitosas; conservar los registros anteriores de Swagger y el poblado.
+
+| Caso | Solicitudes | Resultado esperado |
+| --- | --- | --- |
+| Flujo principal | POST inscripcion, asignacion sin pago previo y matricula; GET de coleccion e individual | 201 al crear, 200 al consultar; estados y fechas iniciales; monto decimal como cadena |
+| Rechazos de contrato | POST con monto 0 o 1.001; PUT de asignacion con aprobada o un campo inmutable | 422; datos originales conservados |
+| Referencia ausente y duplicado | POST con referencia positiva inexistente; repetir inscripcion o comprobante | 409 |
+| Estado y efectos relacionados | Cancelar inscripcion, consultarla y consultar su asignacion; reactivar inscripcion y luego asignacion | 200; cursos cancelados al cancelar; reactivacion del curso individual |
+| Finalizacion protegida | PUT finalizada mientras exista un curso cursando | 400; inscripcion y asignacion conservadas |
+| Regla diferida y rollback | Registrar mensualidad de un mes ajeno al periodo; GET pagos | 400; no aparece el pago rechazado |
+| Anulacion y reemplazo | Anular matricula de prueba y registrar otra con comprobante nuevo | 200 y 201; ambas filas conservadas |
+| Historial y metodos restringidos | PUT cancelada sobre resultado final cerrado; DELETE individual de cualquiera de los tres modulos | 400 para resultado protegido; 405 para DELETE |
+
 ## Transacciones
 
 El motor utiliza aislamiento SERIALIZABLE.
@@ -721,3 +935,68 @@ Remove-Item Env:\PROBAR_POSTGRESQL
 Si PostgreSQL no esta disponible, ejecutar sin PROBAR_POSTGRESQL:
 las 19 pruebas nuevas de integracion y los bloques SQL quedan pendientes;
 las 8 nuevas de esquemas y errores simulados pueden ejecutarse sin conexion.
+
+### Verificacion de inscripciones, asignaciones y pagos
+
+- Suite completa: 86 pruebas aprobadas sin omisiones con PostgreSQL activo,
+  incluidas las 57 anteriores y 29 nuevas. Las nuevas son 7 de esquemas y
+  OpenAPI, 2 de errores simulados y 20 contra PostgreSQL real.
+- Sintaxis Python, carga de la API/OpenAPI y git diff --check comprobados.
+  Las seis versiones instaladas coinciden con requirements.txt; pip check
+  no detecto incompatibilidades. No se agregaron dependencias.
+- Contra PostgreSQL se comprobaron creacion/consulta, referencias ausentes,
+  defaults de fechas y estados, fechas explicitas, duplicados, indices
+  parciales de pagos, meses del periodo y anulacion con reemplazo.
+  El importe limite NUMERIC(10,2) conserva su valor Decimal y su representacion
+  JSON como cadena. La validacion de importes invalidos se prueba en esquemas.
+- Estados reales comprobados: cancelacion de inscripcion y sus cursos,
+  reactivacion individual, finalizacion sin cursos pendientes y rechazo de
+  cambios de inscripciones finalizadas. Tambien se verificaron cupos liberados,
+  duplicidad de curso, cruces del estudiante y rollback de reactivaciones
+  rechazadas, dejando el estado cancelada original.
+- Requisitos academicos reales comprobados: mismo periodo, pertenencia
+  al plan, horario obligatorio, prerrequisitos cerrados en periodos anteriores,
+  insuficiencia de una aprobacion en el mismo periodo, rechazo de cursos ya
+  aprobados y repeticion de intentos reprobados. Reactivar revalida tambien
+  planes, horarios y prerrequisitos modificados mientras la fila esta cancelada.
+- Se comprobaron resultados aprobados/reprobados inmutables, secciones
+  cerradas y notas conservadas. La funcion SQL existente de cierre solo
+  prepara ese historial dentro de las pruebas, sin agregar un endpoint.
+  El SQL directo tambien rechazo cambios de identidad y eliminaciones de
+  inscripciones, asignaciones y pagos, asi como reactivacion de pagos anulados.
+- Se comprobo que asignar no exige pagos de matricula, que anular pagos
+  no altera asignaciones y que una inscripcion cancelada/finalizada admite
+  pagos segun las reglas actuales.
+- La integracion invoca los routers con savepoints dentro de una transaccion
+  SERIALIZABLE externa. Antes de liberar cada savepoint se fuerzan las
+  restricciones diferidas mediante SET CONSTRAINTS ALL IMMEDIATE.
+  La transaccion externa siempre termina en rollback. Los conteos de las
+  17 tablas permanecieron iguales antes y despues de la suite completa.
+  No se eliminaron registros conservados de Swagger; las identidades pueden
+  avanzar y dejar saltos por las pruebas, aunque las filas se descarten.
+- Los fallos de commit y los 40001 de los tests unitarios son simulados;
+  no prueban concurrencia real. Las pruebas reales validan las reglas de
+  PostgreSQL con savepoints, sin confirmar datos permanentes.
+- Los 14 bloques SQL automaticos de 01 y 02 aprobaron. El verificador 04
+  mantiene cuatro diferencias anteriores: carrera, docente y facultad tienen
+  3 registros frente a 2 esperados, y estudiante tiene 9 frente a 8.
+  Los otros 13 conteos coinciden y hay cero resultados cerrados incoherentes.
+  El ejecutor termina con codigo 1 por esas diferencias del poblado.
+  No se modificaron los registros ni los conteos esperados.
+
+La ejecucion interactiva HTTP del conjunto minimo de Swagger y las pruebas
+de concurrencia C1, C2 y 03 en sesiones independientes siguen pendientes.
+Los resultados de secciones anteriores corresponden a sus respectivos
+bloques; la suite actual es la de 86 pruebas indicada aqui.
+
+Para repetir solo las pruebas nuevas:
+
+```powershell
+$env:PROBAR_POSTGRESQL = '1'
+.\.venv\Scripts\python.exe -m unittest backend.tests.test_inscripciones_pagos -v
+Remove-Item Env:\PROBAR_POSTGRESQL
+```
+
+Sin PostgreSQL, ejecutar sin PROBAR_POSTGRESQL: pasan a pendientes las
+20 pruebas nuevas de integracion y los bloques SQL. Las 9 nuevas de
+esquemas y errores simulados pueden ejecutarse sin conexion.
